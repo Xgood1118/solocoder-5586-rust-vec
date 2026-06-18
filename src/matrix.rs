@@ -44,10 +44,10 @@ impl Matrix4 {
         let zero = FloatScalar::zero();
         let one = FloatScalar::one();
         Matrix4::from_rows([
-            [one, zero, zero, zero],
-            [zero, one, zero, zero],
-            [zero, zero, one, zero],
-            [tx, ty, tz, one],
+            [one, zero, zero, tx],
+            [zero, one, zero, ty],
+            [zero, zero, one, tz],
+            [zero, zero, zero, one],
         ])
     }
 
@@ -69,8 +69,8 @@ impl Matrix4 {
         let sin = angle_rad.sin();
         Matrix4::from_rows([
             [one, zero, zero, zero],
-            [zero, cos, sin, zero],
-            [zero, -sin, cos, zero],
+            [zero, cos, -sin, zero],
+            [zero, sin, cos, zero],
             [zero, zero, zero, one],
         ])
     }
@@ -81,9 +81,9 @@ impl Matrix4 {
         let cos = angle_rad.cos();
         let sin = angle_rad.sin();
         Matrix4::from_rows([
-            [cos, zero, -sin, zero],
+            [cos, zero, sin, zero],
             [zero, one, zero, zero],
-            [sin, zero, cos, zero],
+            [-sin, zero, cos, zero],
             [zero, zero, zero, one],
         ])
     }
@@ -94,8 +94,8 @@ impl Matrix4 {
         let cos = angle_rad.cos();
         let sin = angle_rad.sin();
         Matrix4::from_rows([
-            [cos, sin, zero, zero],
-            [-sin, cos, zero, zero],
+            [cos, -sin, zero, zero],
+            [sin, cos, zero, zero],
             [zero, zero, one, zero],
             [zero, zero, zero, one],
         ])
@@ -129,10 +129,10 @@ impl Matrix4 {
         let y = point[1];
         let z = point[2];
         let one = FloatScalar::one();
-        let nx = x * self.get(0, 0) + y * self.get(1, 0) + z * self.get(2, 0) + one * self.get(3, 0);
-        let ny = x * self.get(0, 1) + y * self.get(1, 1) + z * self.get(2, 1) + one * self.get(3, 1);
-        let nz = x * self.get(0, 2) + y * self.get(1, 2) + z * self.get(2, 2) + one * self.get(3, 2);
-        let w = x * self.get(0, 3) + y * self.get(1, 3) + z * self.get(2, 3) + one * self.get(3, 3);
+        let nx = self.get(0, 0) * x + self.get(0, 1) * y + self.get(0, 2) * z + self.get(0, 3) * one;
+        let ny = self.get(1, 0) * x + self.get(1, 1) * y + self.get(1, 2) * z + self.get(1, 3) * one;
+        let nz = self.get(2, 0) * x + self.get(2, 1) * y + self.get(2, 2) * z + self.get(2, 3) * one;
+        let w = self.get(3, 0) * x + self.get(3, 1) * y + self.get(3, 2) * z + self.get(3, 3) * one;
         if w == FloatScalar::zero() {
             return Err(VecMathError::DivisionByZero);
         }
@@ -145,10 +145,9 @@ impl Matrix4 {
         let x = direction[0];
         let y = direction[1];
         let z = direction[2];
-        let zero = FloatScalar::zero();
-        let nx = x * self.get(0, 0) + y * self.get(1, 0) + z * self.get(2, 0) + zero * self.get(3, 0);
-        let ny = x * self.get(0, 1) + y * self.get(1, 1) + z * self.get(2, 1) + zero * self.get(3, 1);
-        let nz = x * self.get(0, 2) + y * self.get(1, 2) + z * self.get(2, 2) + zero * self.get(3, 2);
+        let nx = self.get(0, 0) * x + self.get(0, 1) * y + self.get(0, 2) * z;
+        let ny = self.get(1, 0) * x + self.get(1, 1) * y + self.get(1, 2) * z;
+        let nz = self.get(2, 0) * x + self.get(2, 1) * y + self.get(2, 2) * z;
         Ok(Vector::new(vec![nx, ny, nz]))
     }
 
@@ -159,9 +158,9 @@ impl Matrix4 {
 
     pub fn to_direction_transform(rotation: &Matrix4) -> Self {
         let mut m = rotation.clone();
-        m.set(3, 0, FloatScalar::zero());
-        m.set(3, 1, FloatScalar::zero());
-        m.set(3, 2, FloatScalar::zero());
+        m.set(0, 3, FloatScalar::zero());
+        m.set(1, 3, FloatScalar::zero());
+        m.set(2, 3, FloatScalar::zero());
         m.set(3, 3, FloatScalar::one());
         m
     }
@@ -214,5 +213,33 @@ mod tests {
         assert!((r[0] - 1.0).abs() < 1e-10);
         assert!(r[1].abs() < 1e-10);
         assert!(r[2].abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_column_major_translation() {
+        let zero = FloatScalar::zero();
+        let one = FloatScalar::one();
+        let tx: FloatScalar = num_traits::cast(1.0).unwrap();
+        let ty: FloatScalar = num_traits::cast(2.0).unwrap();
+        let tz: FloatScalar = num_traits::cast(3.0).unwrap();
+
+        let m = Matrix4::from_columns([
+            [one, zero, zero, zero],
+            [zero, one, zero, zero],
+            [zero, zero, one, zero],
+            [tx, ty, tz, one],
+        ]);
+
+        let p = Vector::new(vec![0.0, 0.0, 0.0]);
+        let r = m.transform_point(&p).unwrap();
+        assert!((r[0] - 1.0).abs() < 1e-10);
+        assert!((r[1] - 2.0).abs() < 1e-10);
+        assert!((r[2] - 3.0).abs() < 1e-10);
+
+        let p2 = Vector::new(vec![5.0, 6.0, 7.0]);
+        let r2 = m.transform_point(&p2).unwrap();
+        assert!((r2[0] - 6.0).abs() < 1e-10);
+        assert!((r2[1] - 8.0).abs() < 1e-10);
+        assert!((r2[2] - 10.0).abs() < 1e-10);
     }
 }

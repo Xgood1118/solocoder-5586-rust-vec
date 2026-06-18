@@ -98,9 +98,51 @@ fn read_jsonl(path: &str) -> Result<Vec<Vector>> {
             }
             vectors.push(v);
         } else {
-            return Err(VecMathError::JsonError(
-                serde_json::from_str::<serde_json::Value>(line).unwrap_err()
-            ));
+            match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(v) => {
+                    if let Some(arr) = v.as_array() {
+                        let data: std::result::Result<Vec<FloatScalar>, _> = arr.iter()
+                            .map(|val| val.as_f64()
+                                .and_then(|f| num_traits::cast(f))
+                                .ok_or_else(|| VecMathError::ParseError(
+                                    format!("line {}: JSON array contains non-numeric value", line_idx + 1)
+                                ))
+                            ).collect();
+                        let v = Vector::new(data?);
+                        if let Err(e) = v.validate() {
+                            eprintln!("Warning line {}: {}", line_idx + 1, e);
+                            continue;
+                        }
+                        vectors.push(v);
+                    } else if let Some(obj) = v.as_object() {
+                        let arr = obj.get("vector")
+                            .or_else(|| obj.get("data"))
+                            .or_else(|| obj.get("vec"))
+                            .and_then(|val| val.as_array())
+                            .ok_or_else(|| VecMathError::ParseError(
+                                format!("line {}: JSON object must have 'vector' (or 'data'/'vec') array field", line_idx + 1)
+                            ))?;
+                        let data: std::result::Result<Vec<FloatScalar>, _> = arr.iter()
+                            .map(|val| val.as_f64()
+                                .and_then(|f| num_traits::cast(f))
+                                .ok_or_else(|| VecMathError::ParseError(
+                                    format!("line {}: JSON array contains non-numeric value", line_idx + 1)
+                                ))
+                            ).collect();
+                        let v = Vector::new(data?);
+                        if let Err(e) = v.validate() {
+                            eprintln!("Warning line {}: {}", line_idx + 1, e);
+                            continue;
+                        }
+                        vectors.push(v);
+                    } else {
+                        return Err(VecMathError::ParseError(
+                            format!("line {}: unsupported JSON format, expected array or object with 'vector' field", line_idx + 1)
+                        ));
+                    }
+                }
+                Err(e) => return Err(VecMathError::JsonError(e)),
+            }
         }
     }
     Ok(vectors)
@@ -170,7 +212,6 @@ const BINARY_VERSION: u32 = 1;
 
 fn read_binary(path: &str) -> Result<Vec<Vector>> {
     use std::io::Read;
-    use bytemuck::cast_slice;
 
     let mut file = File::open(path)?;
     let mut buf = Vec::new();
@@ -197,6 +238,7 @@ fn read_binary(path: &str) -> Result<Vec<Vector>> {
 
     let mut offset = 12usize;
     let mut vectors = Vec::with_capacity(count as usize);
+    let size = std::mem::size_of::<FloatScalar>();
 
     for _ in 0..count {
         if offset + 4 > buf.len() {
@@ -205,25 +247,21 @@ fn read_binary(path: &str) -> Result<Vec<Vector>> {
         let dim = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
-        let bytes_len = dim * std::mem::size_of::<FloatScalar>();
+        let bytes_len = dim * size;
         if offset + bytes_len > buf.len() {
             return Err(VecMathError::ParseError("unexpected EOF at vector data".to_string()));
         }
 
         let bytes = &buf[offset..offset + bytes_len];
-        let data: Vec<FloatScalar> = if cfg!(target_endian = "little") {
-            cast_slice::<u8, FloatScalar>(bytes).to_vec()
-        } else {
-            bytes.chunks_exact(std::mem::size_of::<FloatScalar>())
-                .map(|chunk| {
-                    let mut arr = [0u8; 8];
-                    for (i, &b) in chunk.iter().enumerate() {
-                        arr[i] = b;
-                    }
-                    FloatScalar::from_le_bytes(arr)
-                })
-                .collect()
-        };
+        let data: Vec<FloatScalar> = bytes.chunks_exact(size)
+            .map(|chunk| {
+                let mut value: FloatScalar = bytemuck::pod_read_unaligned(chunk);
+                if cfg!(target_endian = "big") {
+                    value = FloatScalar::from_bits(value.to_bits().swap_bytes());
+                }
+                value
+            })
+            .collect();
         offset += bytes_len;
 
         let v = Vector::new(data);
@@ -239,7 +277,6 @@ fn read_binary(path: &str) -> Result<Vec<Vector>> {
 
 fn write_binary(path: &str, vectors: &[Vector]) -> Result<()> {
     use std::io::Write;
-    use bytemuck::cast_slice;
 
     let mut file = File::create(path)?;
 
@@ -250,12 +287,9 @@ fn write_binary(path: &str, vectors: &[Vector]) -> Result<()> {
     for v in vectors {
         let dim = v.dim() as u32;
         file.write_all(&dim.to_le_bytes())?;
-        let bytes = if cfg!(target_endian = "little") {
-            cast_slice::<FloatScalar, u8>(v.data()).to_vec()
-        } else {
-            v.data().iter().flat_map(|&x| x.to_le_bytes()).collect()
-        };
-        file.write_all(&bytes)?;
+        for &x in v.data() {
+            file.write_all(&x.to_bits().to_le_bytes())?;
+        }
     }
 
     file.flush()?;
@@ -355,5 +389,31 @@ mod tests {
             InputFormat::from_filename("vectors.bin").unwrap(),
             InputFormat::Binary
         ));
+    }
+
+    #[test]
+    fn test_binary_roundtrip() {
+        let vectors = vec![
+            Vector::new(vec![1.5, 2.5, 3.5]),
+            Vector::new(vec![4.5, 5.5, 6.5]),
+            Vector::new(vec![7.5, 8.5, 9.5]),
+        ];
+
+        let tmp_dir = std::env::temp_dir();
+        let path = tmp_dir.join("test_vecmath_binary.bin");
+        let path_str = path.to_str().unwrap();
+
+        write_vectors(path_str, &vectors, Some(InputFormat::Binary)).unwrap();
+        let read_back = read_vectors(path_str, Some(InputFormat::Binary)).unwrap();
+
+        assert_eq!(read_back.len(), vectors.len());
+        for (orig, read) in vectors.iter().zip(read_back.iter()) {
+            assert_eq!(orig.dim(), read.dim());
+            for i in 0..orig.dim() {
+                assert!((orig[i] - read[i]).abs() < 1e-10);
+            }
+        }
+
+        let _ = std::fs::remove_file(path);
     }
 }

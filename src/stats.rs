@@ -82,6 +82,7 @@ pub fn compute_statistics(
     clean_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut q_results = Vec::new();
+    let n = clean_values.len();
     for &q in quantiles {
         if !(0.0..=1.0).contains(&q) {
             return Err(VecMathError::InvalidParameter {
@@ -90,8 +91,17 @@ pub fn compute_statistics(
                 reason: "must be in [0, 1]".to_string(),
             });
         }
-        let idx = (q * (clean_values.len() - 1) as f64) as usize;
-        q_results.push((q, clean_values[idx]));
+        let pos = q * (n - 1) as f64;
+        let lower = pos.floor() as usize;
+        let upper = pos.ceil() as usize;
+        if lower == upper {
+            q_results.push((q, clean_values[lower]));
+        } else {
+            let frac: FloatScalar = num_traits::cast(pos - pos.floor()).unwrap();
+            let one = FloatScalar::one();
+            let val = clean_values[lower] * (one - frac) + clean_values[upper] * frac;
+            q_results.push((q, val));
+        }
     }
 
     let histogram = if bin_count > 0 {
@@ -200,5 +210,20 @@ mod tests {
         assert_eq!(batch.per_dimension.len(), 2);
         assert!((batch.per_dimension[0].mean - 2.0).abs() < 1e-10);
         assert!((batch.per_dimension[1].mean - 20.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_quantile_interpolation() {
+        let values: Vec<FloatScalar> = (1..=10).map(|i| num_traits::cast(i).unwrap()).collect();
+        let stats = compute_statistics(&values, &[0.25, 0.5, 0.75, 0.95, 0.99], 0).unwrap();
+        assert_eq!(stats.quantiles.len(), 5);
+
+        let q25 = stats.quantiles.iter().find(|(q, _)| *q == 0.25).map(|(_, v)| *v).unwrap();
+        let q50 = stats.quantiles.iter().find(|(q, _)| *q == 0.50).map(|(_, v)| *v).unwrap();
+        let q75 = stats.quantiles.iter().find(|(q, _)| *q == 0.75).map(|(_, v)| *v).unwrap();
+
+        assert!((q25 - num_traits::cast::<f64, FloatScalar>(3.25).unwrap()).abs() < num_traits::cast::<f64, FloatScalar>(1e-10).unwrap(), "p25 expected 3.25, got {}", q25);
+        assert!((q50 - num_traits::cast::<f64, FloatScalar>(5.5).unwrap()).abs() < num_traits::cast::<f64, FloatScalar>(1e-10).unwrap(), "p50 expected 5.5, got {}", q50);
+        assert!((q75 - num_traits::cast::<f64, FloatScalar>(7.75).unwrap()).abs() < num_traits::cast::<f64, FloatScalar>(1e-10).unwrap(), "p75 expected 7.75, got {}", q75);
     }
 }
